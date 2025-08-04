@@ -1,0 +1,30 @@
+{
+    "name": "BTCLive",
+    "version": "1.0.1",
+    "sptVersion": "~3.11.*",
+    "description": "Live Bitcoin pricing for SPT-AKI",
+    "main": "src/mod.js",
+    "author": "Azrael",
+    "contributors": ["Amightytank", "Shardbyte"],
+    "license": "MIT",
+    "scripts": {
+        "test": "jest",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier --write .",
+        "build": "node scripts/build.js",
+        "dev": "nodemon mod.js"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "eslint": "^8.57.0",
+        "eslint-config-prettier": "^9.1.0",
+        "eslint-plugin-node": "^11.1.0",
+        "jest": "^29.7.0",
+        "nodemon": "^3.0.3",
+        "prettier": "^3.2.5"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
