@@ -17,10 +17,13 @@ Only mess with config if you understand what you are doing/changing.
 
 Config Features:
 
-updateInterval - 2700 seconds to allow 45 minutes between updates
+updateInterval: 2700 seconds to allow 45 minutes between updates
 
-enableLogging - off by default but enabling it will allow you to see the price actively updating on launch in the console.
+enableLogging - on by default, this just shows you the price updating in the server console, feel free to disable this.
 
-enableperiodicUpdates - enable or disable the 45 minute timer.
+enableperiodicUpdates - enable or disable the 45 minute timer
+
+enablePriceCaching - Non functioning, I had intended to use the feature so it would have a fallback but as of right now it doesn't function.
 
 
+Feel free to leave feedback, this is my first mod uploaded.
