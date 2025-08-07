@@ -4,7 +4,6 @@
     "enablePeriodicUpdates": true,
     "advanced": {
         "enablePriceCaching": true,
-        "cacheExpirationHours": 6,
         "apiTimeout": 15000,
         "userAgent": "SPT-LiveBTC-PVE"
     },
