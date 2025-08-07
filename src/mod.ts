@@ -2,9 +2,19 @@ import { request } from "https";
 import * as fs from "fs";
 import * as path from "path";
 import { DependencyContainer } from "tsyringe";
-import { ILogger } from "@spt-aki/models/spt/utils/ILogger";
+// Define ILogger locally if not available from SPT-AKI types
+interface ILogger {
+    info(message: string): void;
+    warn(message: string): void;
+    error(message: string): void;
+}
 import { DatabaseServer } from "@spt-aki/servers/DatabaseServer";
-import { ITemplateItem } from "@spt-aki/models/eft/common/tables/ITemplateItem";
+// Local definition of ITemplateItem to avoid import error
+interface ITemplateItem {
+    Id: string;
+    Price: number;
+    [key: string]: any;
+}
 
 interface LBPRConfig {
     updateInterval: number;
@@ -12,13 +22,14 @@ interface LBPRConfig {
     enablePeriodicUpdates: boolean;
     advanced: {
         enablePriceCaching: boolean;
+        cacheExpirationHours: number;
         apiTimeout: number;
         userAgent: string;
     };
 }
 
 interface PriceCache {
-    [itemId: string]: number;
+    [itemId: string]: number | string;
     gameMode: string;
     lastUpdate: number;
 }
@@ -61,18 +72,31 @@ class LBPR {
             LBPR.log(`LiveBTC initialized for PVE pricing`);
             LBPR.log(`Current Bitcoin price: ${LBPR.bitcoin.Price} RUB`);
 
-            // Always get fresh price on startup
-            LBPR.log("Fetching current Bitcoin price...");
+            // Always try to get fresh price on startup first
+            LBPR.log("Fetching live Bitcoin price on startup...");
             const updateResult = await LBPR.updatePrice();
             if (updateResult) {
-                LBPR.log("Price updated successfully");
+                LBPR.log("Price updated successfully with fresh live data");
             } else {
-                LBPR.log("Failed to update Bitcoin price - using default", "warn");
+                LBPR.log("API failed on startup, attempting to use cached price as fallback", "warn");
+                const cachedPrice = LBPR.loadCachedPrice();
+                if (cachedPrice !== null) {
+                    LBPR.bitcoin.Price = cachedPrice;
+                    LBPR.log(`Using cached Bitcoin price as fallback: ${cachedPrice} RUB`);
+                } else {
+                    LBPR.log("No valid cached price available - keeping default price", "warn");
+                }
             }
 
             // Schedule periodic updates
             if (LBPR.config?.enablePeriodicUpdates) {
-                setInterval(() => LBPR.updatePrice(), LBPR.config.updateInterval * 1000);
+                setInterval(async () => {
+                    LBPR.log("Scheduled price update starting...");
+                    const success = await LBPR.updatePrice();
+                    if (!success) {
+                        LBPR.log("Scheduled update failed, price remains unchanged");
+                    }
+                }, LBPR.config.updateInterval * 1000);
                 LBPR.log(`Updates scheduled every ${LBPR.config.updateInterval / 60} minutes`);
             }
             
@@ -95,6 +119,7 @@ class LBPR {
                 enablePeriodicUpdates: true,
                 advanced: {
                     enablePriceCaching: true,
+                    cacheExpirationHours: 6,
                     apiTimeout: 15000,
                     userAgent: "SPT-LiveBTC-PVE"
                 }
@@ -114,6 +139,7 @@ class LBPR {
                 enablePeriodicUpdates: true,
                 advanced: {
                     enablePriceCaching: true,
+                    cacheExpirationHours: 6,
                     apiTimeout: 15000,
                     userAgent: "SPT-LiveBTC-PVE"
                 }
@@ -131,6 +157,71 @@ class LBPR {
         }
     }
 
+    private static loadCachedPrice(): number | null {
+        if (!LBPR.config?.advanced?.enablePriceCaching) {
+            return null;
+        }
+
+        try {
+            if (!fs.existsSync(LBPR.pricePath)) {
+                LBPR.log("No price cache file found");
+                return null;
+            }
+
+            const cacheData = JSON.parse(fs.readFileSync(LBPR.pricePath, "utf-8")) as PriceCache;
+            
+            // Check if cache contains Bitcoin price
+            const bitcoinPrice = cacheData[LBPR.BITCOIN_ID];
+            if (typeof bitcoinPrice !== 'number' || bitcoinPrice <= 0) {
+                LBPR.log("Invalid Bitcoin price in cache");
+                return null;
+            }
+
+            // Check cache age
+            const cacheAgeHours = (Date.now() / 1000 - cacheData.lastUpdate) / 3600;
+            const maxCacheAgeHours = LBPR.config.advanced.cacheExpirationHours;
+            
+            if (cacheAgeHours > maxCacheAgeHours) {
+                LBPR.log(`Cache expired (${cacheAgeHours.toFixed(1)}h old, max ${maxCacheAgeHours}h)`);
+                return null;
+            }
+
+            LBPR.log(`Cache is valid (${cacheAgeHours.toFixed(1)}h old)`);
+            return bitcoinPrice;
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            LBPR.log(`Failed to load cached price: ${errorMessage}`, "error");
+            return null;
+        }
+    }
+
+    private static savePriceToCache(price: number): void {
+        if (!LBPR.config?.advanced?.enablePriceCaching) {
+            return;
+        }
+
+        try {
+            const cacheData: PriceCache = {
+                [LBPR.BITCOIN_ID]: price,
+                gameMode: "pve",
+                lastUpdate: Math.floor(Date.now() / 1000)
+            };
+            
+            const cacheDir = path.dirname(LBPR.pricePath);
+            if (!fs.existsSync(cacheDir)) {
+                fs.mkdirSync(cacheDir, { recursive: true });
+            }
+            
+            fs.writeFileSync(LBPR.pricePath, JSON.stringify(cacheData, null, 2));
+            LBPR.log("Price cached successfully");
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            LBPR.log(`Failed to save price to cache: ${errorMessage}`, "error");
+        }
+    }
+
     private static async updatePrice(): Promise<boolean> {
         return new Promise((resolve) => {
             const query = `query { items(gameMode: pve, name: "Physical Bitcoin") { basePrice } }`;
@@ -144,12 +235,13 @@ class LBPR {
                 timeout: LBPR.config?.advanced?.apiTimeout || 15000
             }, (res) => {
                 let data = "";
-                res.on("data", (chunk: Buffer) => data += chunk.toString());
+                res.on("data", (chunk: any) => data += chunk.toString());
                 res.on("end", () => {
                     try {
                         const response: TarkovDevResponse = JSON.parse(data);
                         if (response.errors || !response.data?.items?.[0]) {
                             LBPR.log("Failed to fetch Bitcoin price data", "error");
+                            LBPR.handleApiFailure();
                             resolve(false);
                             return;
                         }
@@ -159,6 +251,7 @@ class LBPR {
                         
                         if (!newPrice || newPrice <= 0) {
                             LBPR.log("Invalid price received from API", "error");
+                            LBPR.handleApiFailure();
                             resolve(false);
                             return;
                         }
@@ -175,20 +268,14 @@ class LBPR {
                         const diff = LBPR.bitcoin.Price - oldPrice;
                         LBPR.log(`Bitcoin (PVE): ${oldPrice} → ${LBPR.bitcoin.Price} RUB (${diff > 0 ? '+' : ''}${diff})`);
 
-                        // Cache price (simplified)
-                        if (LBPR.config?.advanced?.enablePriceCaching) {
-                            const cacheData: PriceCache = {
-                                [LBPR.bitcoin.Id]: LBPR.bitcoin.Price,
-                                gameMode: "pve",
-                                lastUpdate: Math.floor(Date.now() / 1000)
-                            };
-                            fs.writeFileSync(LBPR.pricePath, JSON.stringify(cacheData, null, 2));
-                        }
+                        // Save to cache
+                        LBPR.savePriceToCache(LBPR.bitcoin.Price);
                         
                         resolve(true);
                     } catch (e) {
                         const errorMessage = e instanceof Error ? e.message : String(e);
                         LBPR.log(`Error parsing API response: ${errorMessage}`, "error");
+                        LBPR.handleApiFailure();
                         resolve(false);
                     }
                 });
@@ -196,18 +283,35 @@ class LBPR {
 
             req.on("error", (e: Error) => {
                 LBPR.log(`API error: ${e.message}`, "error");
+                LBPR.handleApiFailure();
                 resolve(false);
             });
 
             req.on("timeout", () => {
                 LBPR.log("API request timeout", "error");
                 req.destroy();
+                LBPR.handleApiFailure();
                 resolve(false);
             });
 
             req.write(JSON.stringify({ query }));
             req.end();
         });
+    }
+
+    private static handleApiFailure(): void {
+        if (!LBPR.bitcoin) return;
+
+        const cachedPrice = LBPR.loadCachedPrice();
+        if (cachedPrice !== null && cachedPrice !== LBPR.bitcoin.Price) {
+            const oldPrice = LBPR.bitcoin.Price;
+            LBPR.bitcoin.Price = cachedPrice;
+            LBPR.log(`Fallback to cached price: ${oldPrice} → ${cachedPrice} RUB`);
+        } else if (cachedPrice !== null) {
+            LBPR.log(`Current price matches cache: ${LBPR.bitcoin.Price} RUB`);
+        } else {
+            LBPR.log(`No valid cache available, keeping current price: ${LBPR.bitcoin.Price} RUB`);
+        }
     }
 }
 
